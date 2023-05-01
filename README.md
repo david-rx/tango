@@ -1,3 +1,8 @@
+FORK
+
+Purpose of this fork is to support training AudioLDM models with Tango code, including audio diffusion conditioned on audio.
+
+
 # TANGO: Text to Audio using iNstruction-Guided diffusiOn
 <!-- ![cover](img/tango-neurips.png) -->
 
