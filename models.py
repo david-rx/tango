@@ -146,12 +146,16 @@ class AudioDiffusion(nn.Module):
         boolean_encoder_mask = (attention_mask == 1).to(device)
         return encoder_hidden_states, boolean_encoder_mask
 
-    def forward(self, latents, prompt):
+    def forward(self, latents, prompt, text = True):
         device = self.text_encoder.device
         num_train_timesteps = self.noise_scheduler.num_train_timesteps
         self.noise_scheduler.set_timesteps(num_train_timesteps, device=device)
 
-        encoder_hidden_states, boolean_encoder_mask = self.encode_text(prompt)
+        if text:
+            encoder_hidden_states, boolean_encoder_mask = self.encode_text(prompt)
+        else:
+            # prompt is an audio filepath
+            encoder_hidden_states, boolean_encoder_mask = self.encode_audio(prompt)
         
         if self.uncondition:
             mask_indices = [k for k in range(len(prompt)) if random.random() < 0.1]
@@ -176,15 +180,13 @@ class AudioDiffusion(nn.Module):
 
         if self.set_from == "random":
             model_pred = self.unet(
-                noisy_latents, timesteps, encoder_hidden_states, 
-                encoder_attention_mask=boolean_encoder_mask
+                noisy_latents, timesteps, class_labels=encoder_hidden_states, encoder_hidden_states=None
             ).sample
 
         elif self.set_from == "pre-trained":
             compressed_latents = self.group_in(noisy_latents.permute(0, 2, 3, 1).contiguous()).permute(0, 3, 1, 2).contiguous()
             model_pred = self.unet(
-                compressed_latents, timesteps, encoder_hidden_states, 
-                encoder_attention_mask=boolean_encoder_mask
+                compressed_latents, timesteps, encoder_hidden_states
             ).sample
             model_pred = self.group_out(model_pred.permute(0, 2, 3, 1).contiguous()).permute(0, 3, 1, 2).contiguous()
 
@@ -299,3 +301,6 @@ class AudioDiffusion(nn.Module):
         boolean_prompt_mask = (prompt_mask == 1).to(device)
 
         return prompt_embeds, boolean_prompt_mask
+    
+    def encode_audio(self, audio_file_path: str, num_samples_per_prompt):
+        pass

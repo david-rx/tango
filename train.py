@@ -10,6 +10,7 @@ from pathlib import Path
 import datasets
 import numpy as np
 import pandas as pd
+from diffusers import AudioLDMPipeline
 import wandb
 import torch
 from accelerate import Accelerator
@@ -26,6 +27,8 @@ import tools.torch_tools as torch_tools
 from huggingface_hub import snapshot_download
 from models import build_pretrained_models, AudioDiffusion
 from transformers import SchedulerType, get_scheduler
+
+TRAIN_LOSS_LOG_STEPS = 5
 
 logger = get_logger(__name__)
 
@@ -182,6 +185,9 @@ def parse_args():
             "Only applicable when `--with_tracking` is passed."
         ),
     )
+    parser.add_argument(
+        "--audioldm_model", type=str, default=None
+    )
     args = parser.parse_args()
 
     # Sanity checks
@@ -274,7 +280,8 @@ def main():
 
         accelerator.project_configuration.automatic_checkpoint_naming = False
 
-        wandb.init(project="Text to Audio Diffusion")
+        if args.with_tracking:
+            wandb.init(project="Text to Audio Diffusion Urbansound8k")
 
     accelerator.wait_for_everyone()
 
@@ -296,15 +303,22 @@ def main():
     text_column, audio_column = args.text_column, args.audio_column
 
     # Initialize models
-    pretrained_model_name = "audioldm-s-full"
+    pretrained_model_name = "audioldm-m-full"
     vae, stft = build_pretrained_models(pretrained_model_name)
+    print("built pretrained models!")
     vae.eval()
     stft.eval()
 
     model = AudioDiffusion(
         args.text_encoder_name, args.scheduler_name, args.unet_model_name, args.unet_model_config, args.snr_gamma, args.freeze_text_encoder, args.uncondition
     )
-    
+
+    audioldm = AudioLDMPipeline.from_pretrained(args.audioldm_model)
+    model.text_encoder = audioldm.text_encoder
+    model.unet = audioldm.unet
+    # model.set_from = "pre-trained"
+    print("made audiodiffusion from audioldm!")
+
     if args.hf_model:
         hf_model_path = snapshot_download(repo_id=args.hf_model)
         model.load_state_dict(torch.load("{}/pytorch_model_main.bin".format(hf_model_path), map_location="cpu"))
@@ -415,7 +429,7 @@ def main():
         if args.resume_from_checkpoint is not None or args.resume_from_checkpoint != "":
             accelerator.load_state(args.resume_from_checkpoint)
             # path = os.path.basename(args.resume_from_checkpoint)
-            accelerator.print(f"Resumed from local checkpoint: {args.resume_from_checkpoint}")
+            accelerator.print(f"Resumed local from checkpoint: {args.resume_from_checkpoint}")
         else:
             # Get the most recent checkpoint
             dirs = [f.name for f in os.scandir(os.getcwd()) if f.is_dir()]
@@ -431,21 +445,32 @@ def main():
         for step, batch in enumerate(train_dataloader):
 
             with accelerator.accumulate(model):
-                device = model.device
+                # device = model.device
+                device = "mps" #TODO: changed.
                 text, audios, _ = batch
                 target_length = int(duration * 102.4)
 
                 with torch.no_grad():
                     unwrapped_vae = accelerator.unwrap_model(vae)
-                    mel, _, waveform = torch_tools.wav_to_fbank(audios, target_length, stft)
-                    mel = mel.unsqueeze(1).to(device)
+                    try:
+                        mel, _, waveform = torch_tools.wav_to_fbank(audios, target_length, stft)
+                        mel = mel.unsqueeze(1).to(device)
+                    except Exception as e:
+                        print("failed to load mel batch! Skipping.", e)
+                        continue
                     
                     if args.augment:
-                        mixed_mel, _, _, mixed_captions = torch_tools.augment_wav_to_fbank(audios, text, len(audios), target_length, stft)
-                        mixed_mel = mixed_mel.unsqueeze(1).to(device)
-                        mel = torch.cat([mel, mixed_mel], 0)
-                        text += mixed_captions
-                    
+
+                        try:
+                            mixed_mel, _, _, mixed_captions = torch_tools.augment_wav_to_fbank(audios, text, len(audios), target_length, stft)
+                            mixed_mel = mixed_mel.unsqueeze(1).to(device)
+                            mel = torch.cat([mel, mixed_mel], 0)
+                            text += mixed_captions
+                        
+                        except Exception as e:
+                            print("failed to augment! Skipping.", e)
+                            continue
+
                     true_latent = unwrapped_vae.get_first_stage_encoding(unwrapped_vae.encode_first_stage(mel))
 
                 loss = model(true_latent, text)
@@ -454,6 +479,9 @@ def main():
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
+
+                if step % TRAIN_LOSS_LOG_STEPS == 0 and args.with_tracking:
+                    wandb.log({"step loss": loss, "average loss": total_loss / (step + 1)})
 
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
@@ -476,13 +504,18 @@ def main():
         eval_progress_bar = tqdm(range(len(eval_dataloader)), disable=not accelerator.is_local_main_process)
         for step, batch in enumerate(eval_dataloader):
             with accelerator.accumulate(model) and torch.no_grad():
-                device = model.device
+                # device = model.device
+                device = "mps"
                 text, audios, _ = batch
                 target_length = int(duration * 102.4)
 
                 unwrapped_vae = accelerator.unwrap_model(vae)
-                mel, _, waveform = torch_tools.wav_to_fbank(audios, target_length, stft)
-                mel = mel.unsqueeze(1).to(device)
+                try:
+                    mel, _, waveform = torch_tools.wav_to_fbank(audios, target_length, stft)
+                    mel = mel.unsqueeze(1).to(device)
+                except Exception as e:
+                        print("failed to load mel batch! Skipping.", e)
+                        continue
                 true_latent = unwrapped_vae.get_first_stage_encoding(unwrapped_vae.encode_first_stage(mel))
 
                 val_loss = model(true_latent, text)
@@ -498,7 +531,8 @@ def main():
             result["train_loss"] = round(total_loss.item()/len(train_dataloader), 4)
             result["val_loss"] = round(total_val_loss.item()/len(eval_dataloader), 4)
 
-            wandb.log(result)
+            if args.with_tracking:
+                wandb.log(result)
 
             result_string = "Epoch: {}, Loss Train: {}, Val: {}\n".format(epoch, result["train_loss"], result["val_loss"])
             
