@@ -446,7 +446,7 @@ def main():
 
             with accelerator.accumulate(model):
                 # device = model.device
-                device = "mps" #TODO: changed.
+                device = "cuda" if torch.cuda.is_available() else "mps" #TODO: changed.
                 text, audios, _ = batch
                 target_length = int(duration * 102.4)
 
@@ -474,6 +474,8 @@ def main():
                     true_latent = unwrapped_vae.get_first_stage_encoding(unwrapped_vae.encode_first_stage(mel))
 
                 loss = model(true_latent, text)
+                if loss == torch.nan:
+                    print("nan loss!", )
                 total_loss += loss.detach().float()
                 accelerator.backward(loss)
                 optimizer.step()
@@ -505,7 +507,7 @@ def main():
         for step, batch in enumerate(eval_dataloader):
             with accelerator.accumulate(model) and torch.no_grad():
                 # device = model.device
-                device = "mps"
+                device = "cuda" if torch.cuda.is_available() else "mps"
                 text, audios, _ = batch
                 target_length = int(duration * 102.4)
 
