@@ -10,7 +10,7 @@ from pathlib import Path
 import datasets
 import numpy as np
 import pandas as pd
-from diffusers import AudioLDMPipeline
+from diffusers import AudioLDMPipeline, DDIMScheduler
 import wandb
 import torch
 from accelerate import Accelerator
@@ -317,6 +317,7 @@ def main():
     model.text_encoder = audioldm.text_encoder
     model.unet = audioldm.unet
     model.tokenizer = audioldm.tokenizer
+    model.scheduler = DDIMScheduler.from_config(audioldm.scheduler.config)
     # model.set_from = "pre-trained"
     print("made audiodiffusion from audioldm!")
 

@@ -209,7 +209,7 @@ class AudioDiffusion(nn.Module):
 
     @torch.no_grad()
     def inference(self, prompt, inference_scheduler, num_steps=20, guidance_scale=3, num_samples_per_prompt=1, 
-                  disable_progress=True):
+                  disable_progress=True, generator = None):
         device = self.text_encoder.device
         classifier_free_guidance = guidance_scale > 1.0
         batch_size = len(prompt) * num_samples_per_prompt
@@ -227,8 +227,7 @@ class AudioDiffusion(nn.Module):
         timesteps = inference_scheduler.timesteps
 
         num_channels_latents = self.unet.in_channels
-        latents = self.prepare_latents(batch_size, inference_scheduler, num_channels_latents, prompt_embeds.dtype, device)
-        print("prepared latents", latents)
+        latents = self.prepare_latents(batch_size, inference_scheduler, num_channels_latents, prompt_embeds.dtype, device, generator=generator)
 
         num_warmup_steps = len(timesteps) - num_steps * inference_scheduler.order
         progress_bar = tqdm(range(num_steps), disable=disable_progress)
@@ -259,9 +258,12 @@ class AudioDiffusion(nn.Module):
             latents = self.group_out(latents.permute(0, 2, 3, 1).contiguous()).permute(0, 3, 1, 2).contiguous()
         return latents
 
-    def prepare_latents(self, batch_size, inference_scheduler, num_channels_latents, dtype, device):
-        shape = (batch_size, num_channels_latents, 256, 16)
-        latents = randn_tensor(shape, generator=None, device=device, dtype=dtype)
+    def prepare_latents(self, batch_size, inference_scheduler, num_channels_latents, dtype, device, generator=None):
+        if MATCH_AUDIOLDM:
+            shape = (batch_size, num_channels_latents, 128, 16)
+        else:
+            shape = (batch_size, num_channels_latents, 256, 16)
+        latents = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
         # scale the initial noise by the standard deviation required by the scheduler
         latents = latents * inference_scheduler.init_noise_sigma
         return latents
@@ -280,9 +282,17 @@ class AudioDiffusion(nn.Module):
             # print("te", self.text_encoder)
             if MATCH_AUDIOLDM:
                 prompt_embeds = F.normalize(prompt_embeds, dim=-1)
-        
-        prompt_embeds = prompt_embeds.repeat_interleave(num_samples_per_prompt, 0)
-        attention_mask = attention_mask.repeat_interleave(num_samples_per_prompt, 0)
+                (
+                    bs_embed,
+                    seq_len,
+                ) = prompt_embeds.shape
+                prompt_embeds = prompt_embeds.repeat(1, num_samples_per_prompt)
+                prompt_embeds = prompt_embeds.view(bs_embed * num_samples_per_prompt, seq_len)
+                
+            else:
+                prompt_embeds = prompt_embeds.repeat_interleave(num_samples_per_prompt, 0)
+            
+            attention_mask = attention_mask.repeat_interleave(num_samples_per_prompt, 0)
 
         # get unconditional embeddings for classifier free guidance
         uncond_tokens = [""] * len(prompt)
@@ -301,9 +311,12 @@ class AudioDiffusion(nn.Module):
             )[0]
             if MATCH_AUDIOLDM:
                 negative_prompt_embeds = F.normalize(negative_prompt_embeds, dim=-1)
-                
-        negative_prompt_embeds = negative_prompt_embeds.repeat_interleave(num_samples_per_prompt, 0)
-        uncond_attention_mask = uncond_attention_mask.repeat_interleave(num_samples_per_prompt, 0)
+                negative_prompt_embeds = negative_prompt_embeds.repeat(1, num_samples_per_prompt)
+                negative_prompt_embeds = negative_prompt_embeds.view(bs_embed * num_samples_per_prompt, seq_len)
+            
+            else:     
+                negative_prompt_embeds = negative_prompt_embeds.repeat_interleave(num_samples_per_prompt, 0)
+            uncond_attention_mask = uncond_attention_mask.repeat_interleave(num_samples_per_prompt, 0)
 
         # For classifier free guidance, we need to do two forward passes.
         # We concatenate the unconditional and text embeddings into a single batch to avoid doing two forward passes

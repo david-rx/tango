@@ -18,6 +18,7 @@ from tango import Tango
 from diffusers import AudioLDMPipeline
 
 USE_AUDIOLDM_VAE = True
+MATCH_AUDIOLDM = True
 
 class dotdict(dict):
     """dot.notation access to dictionary attributes"""
@@ -122,7 +123,8 @@ def main():
     audioldm.save_pretrained("audioldm_watkins_fullp4_novae")
     # exit()
     
-    scheduler = DDPMScheduler.from_pretrained(train_args.scheduler_name, subfolder="scheduler")
+    # scheduler = DDPMScheduler.from_pretrained(train_args.scheduler_name, subfolder="scheduler")
+    scheduler = audioldm.scheduler
     evaluator = EvaluationHelper(16000, "cuda:0")
     
     if args.num_samples > 1:
@@ -158,8 +160,8 @@ def main():
         
     # text_prompts = [json.loads(line)[args.text_key] for line in open(args.test_file).readlines()]
     # text_prompts = [prefix + inp for inp in text_prompts]
-
-    text_prompts = ["Spinner Dolphin call", "Beluga, White Whale call", "Gunshot", "Children playing outside"]
+    # "Spinner Dolphin call", "Beluga, White Whale call", "Gunshot", 
+    text_prompts = ["Children playing outside", "Gunshot", "Techno music"]
     
     if args.num_test_instances != - 1:
         text_prompts = text_prompts[:args.num_test_instances]
@@ -167,14 +169,17 @@ def main():
     # Generate #
     num_steps, guidance, batch_size, num_samples = args.num_steps, args.guidance, args.batch_size, args.num_samples
     all_outputs = []
-        
+    
+    generator = torch.Generator(device="cuda")
     for k in tqdm(range(0, len(text_prompts), batch_size)):
         text = text_prompts[k: k+batch_size]
         print("text", text)
         
         with torch.no_grad():
             print("num sam", num_samples)
-            latents = model.inference(text, scheduler, num_steps, guidance, num_samples, disable_progress=True)
+
+            latents = model.inference(text, scheduler, num_steps, guidance, num_samples, disable_progress=True, generator=generator)
+            print("latents shape", latents.shape)
             if USE_AUDIOLDM_VAE:
                 mel = audioldm.decode_latents(latents)
                 wave = audioldm.mel_spectrogram_to_waveform(mel)
@@ -184,7 +189,11 @@ def main():
                 print("WAVSHAPE", wave.shape)
             all_outputs += [item for item in wave]
         
-        waves2 = audioldm(prompt=text).audios
+        waves2 = audioldm(prompt=text, generator=generator).audios
+        # print("audioldm lat shape", latents_audioldm.shape)
+        # print("l1", latents[0])
+        # print("l2", latents_audioldm[0])
+
 
         # print("waves2 shape", waves2.shape)
         for index, w in enumerate(waves2):
