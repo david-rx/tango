@@ -303,7 +303,7 @@ def main():
     text_column, audio_column = args.text_column, args.audio_column
 
     # Initialize models
-    pretrained_model_name = "audioldm-m-full"
+    pretrained_model_name = "audioldm-s-full-v2"
     vae, stft = build_pretrained_models(pretrained_model_name)
     print("built pretrained models!")
     vae.eval()
@@ -316,6 +316,7 @@ def main():
     audioldm = AudioLDMPipeline.from_pretrained(args.audioldm_model)
     model.text_encoder = audioldm.text_encoder
     model.unet = audioldm.unet
+    model.tokenizer = audioldm.tokenizer
     # model.set_from = "pre-trained"
     print("made audiodiffusion from audioldm!")
 
@@ -472,12 +473,12 @@ def main():
                             continue
 
                     true_latent = unwrapped_vae.get_first_stage_encoding(unwrapped_vae.encode_first_stage(mel))
-
-                loss = model(true_latent, text)
-                if loss == torch.nan:
-                    print("nan loss!", )
-                total_loss += loss.detach().float()
-                accelerator.backward(loss)
+                with torch.backends.cuda.sdp_kernel(enable_flash=False) as disable:
+                    loss = model(true_latent, text)
+                    if loss == torch.nan:
+                        print("nan loss!", )
+                    total_loss += loss.detach().float()
+                    accelerator.backward(loss)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
@@ -496,6 +497,7 @@ def main():
                     if args.output_dir is not None:
                         output_dir = os.path.join(args.output_dir, output_dir)
                     accelerator.save_state(output_dir)
+                    audioldm.save_pretrained("hf_audioldm")
 
             if completed_steps >= args.max_train_steps:
                 break
@@ -506,7 +508,7 @@ def main():
         eval_progress_bar = tqdm(range(len(eval_dataloader)), disable=not accelerator.is_local_main_process)
         for step, batch in enumerate(eval_dataloader):
             with accelerator.accumulate(model) and torch.no_grad():
-                # device = model.device
+                
                 device = "cuda" if torch.cuda.is_available() else "mps"
                 text, audios, _ = batch
                 target_length = int(duration * 102.4)
@@ -530,7 +532,8 @@ def main():
             result = {}
             result["epoch"] = epoch+1,
             result["step"] = completed_steps
-            result["train_loss"] = round(total_loss.item()/len(train_dataloader), 4)
+            total_loss_var = total_loss if type(total_loss) == int else total_loss.item()
+            result["train_loss"] = round(total_loss_var/len(train_dataloader), 4)
             result["val_loss"] = round(total_val_loss.item()/len(eval_dataloader), 4)
 
             if args.with_tracking:

@@ -23,6 +23,8 @@ from diffusers.utils import randn_tensor
 from diffusers import DDPMScheduler, UNet2DConditionModel
 from diffusers import AutoencoderKL as DiffuserAutoencoderKL
 
+MATCH_AUDIOLDM = True
+
 
 def build_pretrained_models(name):
     checkpoint = torch.load(get_metadata()[name]["path"], map_location="cpu")
@@ -219,11 +221,14 @@ class AudioDiffusion(nn.Module):
             prompt_embeds = prompt_embeds.repeat_interleave(num_samples_per_prompt, 0)
             boolean_prompt_mask = boolean_prompt_mask.repeat_interleave(num_samples_per_prompt, 0)
 
+        print("prompt embeds tango", prompt_embeds)
+
         inference_scheduler.set_timesteps(num_steps, device=device)
         timesteps = inference_scheduler.timesteps
 
         num_channels_latents = self.unet.in_channels
         latents = self.prepare_latents(batch_size, inference_scheduler, num_channels_latents, prompt_embeds.dtype, device)
+        print("prepared latents", latents)
 
         num_warmup_steps = len(timesteps) - num_steps * inference_scheduler.order
         progress_bar = tqdm(range(num_steps), disable=disable_progress)
@@ -234,8 +239,8 @@ class AudioDiffusion(nn.Module):
             latent_model_input = inference_scheduler.scale_model_input(latent_model_input, t)
 
             noise_pred = self.unet(
-                latent_model_input, t, encoder_hidden_states=prompt_embeds,
-                encoder_attention_mask=boolean_prompt_mask
+                latent_model_input, t, class_labels=prompt_embeds, encoder_hidden_states=None,
+                # encoder_attention_mask=boolean_prompt_mask
             ).sample
 
             # perform guidance
@@ -264,7 +269,7 @@ class AudioDiffusion(nn.Module):
     def encode_text_classifier_free(self, prompt, num_samples_per_prompt):
         device = self.text_encoder.device
         batch = self.tokenizer(
-            prompt, max_length=self.tokenizer.model_max_length, padding=True, truncation=True, return_tensors="pt"
+            prompt, max_length=512, padding="max_length", truncation=True, return_tensors="pt"
         )
         input_ids, attention_mask = batch.input_ids.to(device), batch.attention_mask.to(device)
 
@@ -272,7 +277,10 @@ class AudioDiffusion(nn.Module):
             prompt_embeds = self.text_encoder(
                 input_ids=input_ids, attention_mask=attention_mask
             )[0]
-                
+            # print("te", self.text_encoder)
+            if MATCH_AUDIOLDM:
+                prompt_embeds = F.normalize(prompt_embeds, dim=-1)
+        
         prompt_embeds = prompt_embeds.repeat_interleave(num_samples_per_prompt, 0)
         attention_mask = attention_mask.repeat_interleave(num_samples_per_prompt, 0)
 
@@ -286,16 +294,21 @@ class AudioDiffusion(nn.Module):
         uncond_input_ids = uncond_batch.input_ids.to(device)
         uncond_attention_mask = uncond_batch.attention_mask.to(device)
 
+
         with torch.no_grad():
             negative_prompt_embeds = self.text_encoder(
                 input_ids=uncond_input_ids, attention_mask=uncond_attention_mask
             )[0]
+            if MATCH_AUDIOLDM:
+                negative_prompt_embeds = F.normalize(negative_prompt_embeds, dim=-1)
                 
         negative_prompt_embeds = negative_prompt_embeds.repeat_interleave(num_samples_per_prompt, 0)
         uncond_attention_mask = uncond_attention_mask.repeat_interleave(num_samples_per_prompt, 0)
 
         # For classifier free guidance, we need to do two forward passes.
         # We concatenate the unconditional and text embeddings into a single batch to avoid doing two forward passes
+
+        print(f"shapes: pe {prompt_embeds.shape} npe {negative_prompt_embeds.shape} unc am {uncond_attention_mask.shape} am {attention_mask.shape}")
         prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
         prompt_mask = torch.cat([uncond_attention_mask, attention_mask])
         boolean_prompt_mask = (prompt_mask == 1).to(device)

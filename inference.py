@@ -1,3 +1,5 @@
+
+import scipy
 import os
 import copy
 import json
@@ -13,6 +15,9 @@ from models import build_pretrained_models, AudioDiffusion
 from transformers import AutoProcessor, ClapModel
 import torchaudio
 from tango import Tango
+from diffusers import AudioLDMPipeline
+
+USE_AUDIOLDM_VAE = True
 
 class dotdict(dict):
     """dot.notation access to dictionary attributes"""
@@ -56,7 +61,7 @@ def parse_args():
         help="Guidance scale for classifier free guidance."
     )
     parser.add_argument(
-        "--batch_size", type=int, default=8,
+        "--batch_size", type=int, default=2,
         help="Batch size for generation.",
     )
     parser.add_argument(
@@ -84,17 +89,38 @@ def main():
         tango = Tango(train_args.hf_model, "cpu")
         vae, stft, model = tango.vae.cuda(), tango.stft.cuda(), tango.model.cuda()
     else:
-        name = "audioldm-s-full"
+        name = "audioldm-s-full-v2"
         vae, stft = build_pretrained_models(name)
         vae, stft = vae.cuda(), stft.cuda()
         model = AudioDiffusion(
             train_args.text_encoder_name, train_args.scheduler_name, train_args.unet_model_name, train_args.unet_model_config, train_args.snr_gamma
         ).cuda()
-        model.eval()
+        audioldm = AudioLDMPipeline.from_pretrained(f"cvssp/{name}")
+
+        model.text_encoder = audioldm.text_encoder.cuda()
+        model.unet = audioldm.unet.cuda()
+        audioldm.vocoder.cuda()
+        model.tokenizer = audioldm.tokenizer
+        if USE_AUDIOLDM_VAE:
+            vae = audioldm.vae.cuda()
+        # model.vae = audioldm.vae
+        # model.eval()
     
     # Load Trained Weight #
-    device = vae.device()
-    model.load_state_dict(torch.load(args.model))
+    if USE_AUDIOLDM_VAE:
+        device = vae.device
+    else:
+        device = vae.device()
+    # model.load_state_dict(torch.load(args.model))
+    # model.unet.save_pretrained
+
+    audioldm.unet = model.unet
+    # audioldm.vae = vae
+    # audioldm.vocoder = model.vocoder
+    audioldm.text_encoder = model.text_encoder
+
+    audioldm.save_pretrained("audioldm_watkins_fullp4_novae")
+    # exit()
     
     scheduler = DDPMScheduler.from_pretrained(train_args.scheduler_name, subfolder="scheduler")
     evaluator = EvaluationHelper(16000, "cuda:0")
@@ -130,8 +156,10 @@ def main():
     else:
         prefix = ""
         
-    text_prompts = [json.loads(line)[args.text_key] for line in open(args.test_file).readlines()]
-    text_prompts = [prefix + inp for inp in text_prompts]
+    # text_prompts = [json.loads(line)[args.text_key] for line in open(args.test_file).readlines()]
+    # text_prompts = [prefix + inp for inp in text_prompts]
+
+    text_prompts = ["Spinner Dolphin call", "Beluga, White Whale call", "Gunshot", "Children playing outside"]
     
     if args.num_test_instances != - 1:
         text_prompts = text_prompts[:args.num_test_instances]
@@ -142,12 +170,29 @@ def main():
         
     for k in tqdm(range(0, len(text_prompts), batch_size)):
         text = text_prompts[k: k+batch_size]
+        print("text", text)
         
         with torch.no_grad():
+            print("num sam", num_samples)
             latents = model.inference(text, scheduler, num_steps, guidance, num_samples, disable_progress=True)
-            mel = vae.decode_first_stage(latents)
-            wave = vae.decode_to_waveform(mel)
+            if USE_AUDIOLDM_VAE:
+                mel = audioldm.decode_latents(latents)
+                wave = audioldm.mel_spectrogram_to_waveform(mel)
+            else:
+                mel = vae.decode_first_stage(latents)
+                wave = vae.decode_to_waveform(mel)
+                print("WAVSHAPE", wave.shape)
             all_outputs += [item for item in wave]
+        
+        waves2 = audioldm(prompt=text).audios
+
+        # print("waves2 shape", waves2.shape)
+        for index, w in enumerate(waves2):
+            print("wave", w)
+            scipy.io.wavfile.write(f"outputs/output_{index}.wav", rate=16000, data=w)
+            # sf.write(f"outputs/output_{index}.wav", w, samplerate=16000)
+        # all_outputs += [item for item in waves2]
+
             
     # Save #
     exp_id = str(int(time.time()))
