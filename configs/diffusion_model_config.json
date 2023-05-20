@@ -15,7 +15,7 @@
     1280
   ],
   "center_input_sample": false,
-  "cross_attention_dim": 1024,
+  "cross_attention_dim": 512,
   "down_block_types": [
     "CrossAttnDownBlock2D",
     "CrossAttnDownBlock2D",

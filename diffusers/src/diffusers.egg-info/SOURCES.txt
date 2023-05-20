@@ -197,7 +197,7 @@ src/diffusers/utils/dummy_torch_and_librosa_objects.py
 src/diffusers/utils/dummy_torch_and_scipy_objects.py
 src/diffusers/utils/dummy_torch_and_transformers_and_k_diffusion_objects.py
 src/diffusers/utils/dummy_torch_and_transformers_and_onnx_objects.py
-src/diffusers/utils/dummy_torch_and_transformers_objects1.py
+src/diffusers/utils/dummy_torch_and_transformers_objects.py
 src/diffusers/utils/dummy_transformers_and_torch_and_note_seq_objects.py
 src/diffusers/utils/dynamic_modules_utils.py
 src/diffusers/utils/hub_utils.py

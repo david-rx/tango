@@ -144,6 +144,9 @@ class AudioDiffusion(nn.Module):
             encoder_hidden_states = self.text_encoder(
                 input_ids=input_ids, attention_mask=attention_mask
             )[0]
+        
+        if MATCH_AUDIOLDM:
+            encoder_hidden_states = F.normalize(encoder_hidden_states, dim=-1)
 
         boolean_encoder_mask = (attention_mask == 1).to(device)
         return encoder_hidden_states, boolean_encoder_mask
@@ -181,9 +184,18 @@ class AudioDiffusion(nn.Module):
             raise ValueError(f"Unknown prediction type {self.noise_scheduler.config.prediction_type}")
 
         if self.set_from == "random":
-            model_pred = self.unet(
-                noisy_latents, timesteps, class_labels=encoder_hidden_states, encoder_hidden_states=None
-            ).sample
+            if MATCH_AUDIOLDM:
+                model_pred = self.unet(
+                    noisy_latents, timesteps, class_labels=encoder_hidden_states, encoder_hidden_states=None
+                ).sample
+            else:
+                # model_pred = self.unet(
+                #     noisy_latents, timesteps, class_labels=encoder_hidden_states, encoder_hidden_states=None
+                # ).sample
+                model_pred = self.unet(
+                    noisy_latents, timesteps, encoder_hidden_states, 
+                    encoder_attention_mask=boolean_encoder_mask
+                ).sample
 
         elif self.set_from == "pre-trained":
             compressed_latents = self.group_in(noisy_latents.permute(0, 2, 3, 1).contiguous()).permute(0, 3, 1, 2).contiguous()
@@ -236,11 +248,17 @@ class AudioDiffusion(nn.Module):
             # expand the latents if we are doing classifier free guidance
             latent_model_input = torch.cat([latents] * 2) if classifier_free_guidance else latents
             latent_model_input = inference_scheduler.scale_model_input(latent_model_input, t)
+            if MATCH_AUDIOLDM:
+                noise_pred = self.unet(
+                    latent_model_input, t, class_labels=prompt_embeds, encoder_hidden_states=None,
+                    # encoder_attention_mask=boolean_prompt_mask
+                ).sample
+            else:
+                noise_pred = self.unet(
+                    latent_model_input, t, prompt_embeds, 
+                    encoder_attention_mask=boolean_prompt_mask
+                ).sample
 
-            noise_pred = self.unet(
-                latent_model_input, t, class_labels=prompt_embeds, encoder_hidden_states=None,
-                # encoder_attention_mask=boolean_prompt_mask
-            ).sample
 
             # perform guidance
             if classifier_free_guidance:

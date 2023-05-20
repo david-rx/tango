@@ -29,6 +29,7 @@ from models import build_pretrained_models, AudioDiffusion
 from transformers import SchedulerType, get_scheduler
 
 TRAIN_LOSS_LOG_STEPS = 5
+USE_AUDIOLDM_VAE = False
 
 logger = get_logger(__name__)
 
@@ -188,6 +189,9 @@ def parse_args():
     parser.add_argument(
         "--audioldm_model", type=str, default=None
     )
+    parser.add_argument(
+        "--load_from_audioldm", action="store_true", default=False
+    )
     args = parser.parse_args()
 
     # Sanity checks
@@ -243,7 +247,7 @@ def main():
         accelerator_log_kwargs["log_with"] = args.report_to
         accelerator_log_kwargs["logging_dir"] = args.output_dir
 
-    accelerator = Accelerator(gradient_accumulation_steps=args.gradient_accumulation_steps, **accelerator_log_kwargs)
+    accelerator = Accelerator(gradient_accumulation_steps=args.gradient_accumulation_steps, **accelerator_log_kwargs, mixed_precision="bf16")
     
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
@@ -304,6 +308,7 @@ def main():
 
     # Initialize models
     pretrained_model_name = "audioldm-s-full-v2"
+    # pretrained_model_name = "audioldm-m-text-ft"
     vae, stft = build_pretrained_models(pretrained_model_name)
     print("built pretrained models!")
     vae.eval()
@@ -312,14 +317,16 @@ def main():
     model = AudioDiffusion(
         args.text_encoder_name, args.scheduler_name, args.unet_model_name, args.unet_model_config, args.snr_gamma, args.freeze_text_encoder, args.uncondition
     )
+    
 
-    audioldm = AudioLDMPipeline.from_pretrained(args.audioldm_model)
-    model.text_encoder = audioldm.text_encoder
-    model.unet = audioldm.unet
-    model.tokenizer = audioldm.tokenizer
-    model.scheduler = DDIMScheduler.from_config(audioldm.scheduler.config)
-    # model.set_from = "pre-trained"
-    print("made audiodiffusion from audioldm!")
+    if args.load_from_audioldm:
+        audioldm = AudioLDMPipeline.from_pretrained(args.audioldm_model)
+        model.text_encoder = audioldm.text_encoder
+        model.unet = audioldm.unet
+        model.tokenizer = audioldm.tokenizer
+        audioldm.vae.cuda()
+        model.noise_scheduler = DDIMScheduler.from_config(audioldm.scheduler.config)
+        print("made audiodiffusion from audioldm!")
 
     if args.hf_model:
         hf_model_path = snapshot_download(repo_id=args.hf_model)
@@ -330,6 +337,10 @@ def main():
         prefix = args.prefix
     else:
         prefix = ""
+
+    # torch.compile(model)
+    # torch.compile(audioldm.vae)
+    # torch.compile(stft)
 
     with accelerator.main_process_first():
         train_dataset = Text2AudioDataset(raw_datasets["train"], prefix, text_column, audio_column, args.num_examples)
@@ -472,8 +483,10 @@ def main():
                         except Exception as e:
                             print("failed to augment! Skipping.", e)
                             continue
-
-                    true_latent = unwrapped_vae.get_first_stage_encoding(unwrapped_vae.encode_first_stage(mel))
+                    if USE_AUDIOLDM_VAE:
+                        true_latent = audioldm.vae.encode(mel).latent_dist.sample() * audioldm.scheduler.init_noise_sigma
+                    else:
+                        true_latent = unwrapped_vae.get_first_stage_encoding(unwrapped_vae.encode_first_stage(mel))
                 with torch.backends.cuda.sdp_kernel(enable_flash=False) as disable:
                     loss = model(true_latent, text)
                     if loss == torch.nan:

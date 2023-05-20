@@ -17,8 +17,9 @@ import torchaudio
 from tango import Tango
 from diffusers import AudioLDMPipeline
 
-USE_AUDIOLDM_VAE = True
+USE_AUDIOLDM_VAE = False
 MATCH_AUDIOLDM = True
+USE_CUDA = False
 
 class dotdict(dict):
     """dot.notation access to dictionary attributes"""
@@ -82,6 +83,7 @@ def main():
     args = parse_args()
     
     train_args = dotdict(json.loads(open(args.original_args).readlines()[0]))
+    print(train_args)
     if "hf_model" not in train_args:
         train_args["hf_model"] = None
     
@@ -91,19 +93,37 @@ def main():
         vae, stft, model = tango.vae.cuda(), tango.stft.cuda(), tango.model.cuda()
     else:
         name = "audioldm-s-full-v2"
+        # name = "models_watkins_fixed"
         vae, stft = build_pretrained_models(name)
-        vae, stft = vae.cuda(), stft.cuda()
+        
         model = AudioDiffusion(
             train_args.text_encoder_name, train_args.scheduler_name, train_args.unet_model_name, train_args.unet_model_config, train_args.snr_gamma
-        ).cuda()
-        audioldm = AudioLDMPipeline.from_pretrained(f"cvssp/{name}")
+        )
+        if USE_CUDA:
+            vae, stft = vae.cuda(), stft.cuda()
+            model = model.cuda()
 
-        model.text_encoder = audioldm.text_encoder.cuda()
-        model.unet = audioldm.unet.cuda()
-        audioldm.vocoder.cuda()
-        model.tokenizer = audioldm.tokenizer
-        if USE_AUDIOLDM_VAE:
-            vae = audioldm.vae.cuda()
+        audioldm = AudioLDMPipeline.from_pretrained(f"cvssp/{name}")
+        
+        if USE_CUDA:
+            audioldm.vae.cuda()
+            audioldm.vocoder.cuda()
+
+            if MATCH_AUDIOLDM:
+                model.text_encoder = audioldm.text_encoder.cuda()
+                model.unet = audioldm.unet.cuda()
+                
+                model.tokenizer = audioldm.tokenizer
+            if USE_AUDIOLDM_VAE:
+                vae = audioldm.vae.cuda()
+        else:
+            if MATCH_AUDIOLDM:
+                model.text_encoder = audioldm.text_encoder
+                model.unet = audioldm.unet
+                model.tokenizer = audioldm.tokenizer
+            if USE_AUDIOLDM_VAE:
+                vae = audioldm.vae
+
         # model.vae = audioldm.vae
         # model.eval()
     
@@ -112,19 +132,19 @@ def main():
         device = vae.device
     else:
         device = vae.device()
-    # model.load_state_dict(torch.load(args.model))
+    model.load_state_dict(torch.load(args.model, map_location="cpu"))
     # model.unet.save_pretrained
 
-    audioldm.unet = model.unet
-    # audioldm.vae = vae
-    # audioldm.vocoder = model.vocoder
-    audioldm.text_encoder = model.text_encoder
+    if MATCH_AUDIOLDM:
+        audioldm.unet = model.unet
+        audioldm.text_encoder = model.text_encoder
 
-    audioldm.save_pretrained("audioldm_watkins_fullp4_novae")
-    # exit()
+        audioldm_save_path = "audioldm_" + "_".join(args.model.split("/")[1:-1])
+        print("saving audioldm to", audioldm_save_path)
+        audioldm.save_pretrained(audioldm_save_path)
     
-    # scheduler = DDPMScheduler.from_pretrained(train_args.scheduler_name, subfolder="scheduler")
     scheduler = audioldm.scheduler
+
     evaluator = EvaluationHelper(16000, "cuda:0")
     
     if args.num_samples > 1:
@@ -161,7 +181,7 @@ def main():
     # text_prompts = [json.loads(line)[args.text_key] for line in open(args.test_file).readlines()]
     # text_prompts = [prefix + inp for inp in text_prompts]
     # "Spinner Dolphin call", "Beluga, White Whale call", "Gunshot", 
-    text_prompts = ["Children playing outside", "Gunshot", "Techno music"]
+    text_prompts = ["Beluga, White Whale call", "Spinner Dolphin call", "Clymene Dolphin call", "Bearded Seal call", "Minke Whale call", "Rooster", "Toilet flush", "Buff-bellied Pipit", "American Goldfinch", "Grass coqui"]
     
     if args.num_test_instances != - 1:
         text_prompts = text_prompts[:args.num_test_instances]
@@ -170,7 +190,7 @@ def main():
     num_steps, guidance, batch_size, num_samples = args.num_steps, args.guidance, args.batch_size, args.num_samples
     all_outputs = []
     
-    generator = torch.Generator(device="cuda")
+    generator = torch.Generator(device=device)
     for k in tqdm(range(0, len(text_prompts), batch_size)):
         text = text_prompts[k: k+batch_size]
         print("text", text)
@@ -189,18 +209,11 @@ def main():
                 print("WAVSHAPE", wave.shape)
             all_outputs += [item for item in wave]
         
-        waves2 = audioldm(prompt=text, generator=generator).audios
-        # print("audioldm lat shape", latents_audioldm.shape)
-        # print("l1", latents[0])
-        # print("l2", latents_audioldm[0])
+        # waves2 = audioldm(prompt=text, generator=generator).audios
 
-
-        # print("waves2 shape", waves2.shape)
-        for index, w in enumerate(waves2):
-            print("wave", w)
-            scipy.io.wavfile.write(f"outputs/output_{index}.wav", rate=16000, data=w)
-            # sf.write(f"outputs/output_{index}.wav", w, samplerate=16000)
-        # all_outputs += [item for item in waves2]
+        # for index, w in enumerate(waves2):
+        #     print("wave", w)
+        #     scipy.io.wavfile.write(f"outputs/output_{index}.wav", rate=16000, data=w)
 
             
     # Save #

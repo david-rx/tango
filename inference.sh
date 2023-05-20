@@ -1,2 +1,2 @@
-CUDA_VISIBLE_DEVICES=0 python inference.py --original_args="models_watkins_fullprecision/summary.jsonl" \
---model="models_watkins_fullprecision/epoch_33/pytorch_model_2.bin" --num_steps 200 --guidance 3 --num_samples 1
+CUDA_VISIBLE_DEVICES=0 python inference.py --original_args="models_beans_16k/summary.jsonl" \
+--model="models_beans_16k/epoch_30/pytorch_model_2.bin" --num_steps 200 --guidance 3 --num_samples 3 --batch_size 1
